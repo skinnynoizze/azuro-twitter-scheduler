@@ -1,4 +1,4 @@
-# Azuro Twitter Scheduler (README v2)
+# Azuro Twitter Scheduler
 
 ## Overview
 
