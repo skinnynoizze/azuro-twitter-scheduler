@@ -20,4 +20,8 @@ Thumbs.db
 # IDE/editor folders
 .vscode/
 .idea/
-*.swp 
+*.swp
+
+# Ignore lockfiles for other package managers
+package-lock.json
+yarn.lock 
