@@ -360,9 +360,9 @@ export class AzuroProvider {
 
                 return {
                     text: output,
-                    sportSlug: firstGame?.sport?.slug || 'ice-hockey',
-                    countrySlug: firstGame?.league?.country?.slug || 'russia',
-                    leagueSlug: firstGame?.league?.slug || 'khl',
+                    sportSlug: firstGame.sport.slug,
+                    countrySlug: firstGame.league.country.slug,
+                    leagueSlug: firstGame.league.slug,
                     leagueId: leagueInfo.leagueId,
                     games: events,
                     attachments

@@ -90,13 +90,20 @@ azuro-twitter-scheduler/
   assets/           # League images (optional)
   src/
     azuro.ts        # Game data fetching and formatting
-    scheduler.ts    # Scheduling and posting logic
-    twitter.ts      # Twitter client integration
+    config.ts       # Configuration settings
     index.ts        # App entry point
-  .env              # Your environment variables
-  package.json
-  READMEV2.md       # This file
+    logger.ts       # Logging functionality
+    media.ts        # Media handling utilities
+    scheduler.ts    # Scheduling and posting logic
+    tweet-formatter.ts # Tweet formatting utilities
+    twitter.ts      # Twitter client integration
+  .env.example      # Example environment variables template
+  package.json      # Project metadata and dependencies
+  README.md         # This documentation file
+  tsconfig.json     # TypeScript configuration
 ```
+
+> **Note:** To configure the app, copy `.env.example` to `.env` and fill in your credentials.
 
 ---
 

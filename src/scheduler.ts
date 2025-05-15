@@ -1,22 +1,10 @@
 // scheduler.ts
 import { TwitterClient } from './twitter';
-import { azuroProvider, leagues } from './azuro';
-import dotenv from 'dotenv';
+import { azuroProvider, leagues, Game, TweetData } from './azuro';
 import { logger } from './logger';
 import { prepareMediaData } from './media';
-
-// Load environment variables
-dotenv.config();
-
-const RUN_ON_START = process.env.RUN_ON_START === 'true';
-const POST_ON_START = process.env.POST_ON_START === 'true';
-const SUPPORTS_NOTETWEET = process.env.SUPPORTS_NOTETWEET === 'true';
-
-function requireEnv(name: string): string {
-    const value = process.env[name];
-    if (!value) throw new Error(`Missing required environment variable: ${name}`);
-    return value;
-}
+import { ENV, TWITTER_CONFIG, LEAGUE_FETCH_TIMES, requireEnv } from './config';
+import { formatTweetText, generateLinkTweet } from './tweet-formatter';
 
 export class AzuroScheduler {
     private leagueSchedules: Map<string, NodeJS.Timeout> = new Map();
@@ -31,72 +19,67 @@ export class AzuroScheduler {
                 guest_id: requireEnv('TWITTER_COOKIES_GUEST_ID')
             },
             username: requireEnv('TWITTER_USERNAME'),
-            isDryRun: process.env.TWITTER_DRY_RUN === 'true'
+            isDryRun: ENV.TWITTER_DRY_RUN
         });
 
-        logger.info('[INFO] AzuroScheduler initialized with Twitter client');
+        logger.info('AzuroScheduler initialized with Twitter client');
     }
 
     /**
      * Start the scheduler for all leagues
      */
     start() {
-        // League fetch times (in CET)
-        const leagueFetchTimes = {
-            EPL: {
-                fetchHour: 10, // 10:00 CET (11:00 ESPAÑA de la mañana)
-                fetchMinute: 0,
-                timeZone: "Europe/Madrid"
-            },
-            NBA: {
-                fetchHour: 15, // 15:00 CET (16:00 ESPAÑA de la tarde)
-                fetchMinute: 0,
-                timeZone: "Europe/Madrid"
-            },
-            NHL: {
-                fetchHour: 11, // 11:00 CET (12:00 ESPAÑA de la mañana)
-                fetchMinute: 0,
-                timeZone: "Europe/Madrid"
-            },
-            MLB: {
-                fetchHour: 11, // 11:00 CET (12:00 ESPAÑA de la mañana)
-                fetchMinute: 0,
-                timeZone: "Europe/Madrid"
-            }
-        };
-
         // Set up scheduled fetches
-        logger.info('[INFO] Setting up scheduled fetches');
-        for (const [league, config] of Object.entries(leagueFetchTimes)) {
+        logger.info('Setting up scheduled fetches');
+        for (const [league, config] of Object.entries(LEAGUE_FETCH_TIMES)) {
             this.setupLeagueScheduler(league, config);
         }
 
-        // If RUN_ON_START is true, fetch and schedule all leagues immediately
-        if (RUN_ON_START) {
-            logger.info('[INFO] RUN_ON_START is true: Fetching and scheduling all leagues immediately.');
-            for (const league of Object.keys(leagues)) {
-                this.fetchAndScheduleLeague(league);
-            }
-        }
-
-        // If POST_ON_START is true, fetch and post all leagues immediately
-        if (POST_ON_START) {
-            logger.info('[INFO] POST_ON_START is true: Posting tweets for all leagues immediately.');
-            for (const league of Object.keys(leagues)) {
-                azuroProvider.getGames(leagues[league as keyof typeof leagues].leagueId).then(gamesData => {
+        // If RUN_ON_START or POST_ON_START is true, fetch leagues immediately
+        if (ENV.RUN_ON_START || ENV.POST_ON_START) {
+            logger.info('Immediate startup actions triggered');
+            
+            // Fetch games for all leagues once
+            const fetchPromises = Object.keys(leagues).map(async (league) => {
+                const leagueKey = league as keyof typeof leagues;
+                
+                logger.info(`Fetching games for ${league}`);
+                const gamesData = await azuroProvider.getGames(leagues[leagueKey].leagueId);
+                
+                // Store fetched data for both scheduling and posting
+                if (gamesData && gamesData.tweets && gamesData.tweets.length > 0) {
                     const leagueTweetData = gamesData.tweets.find(
-                        t => t.leagueId === leagues[league as keyof typeof leagues].leagueId
+                        t => t.leagueId === leagues[leagueKey].leagueId
                     );
+                    
                     if (leagueTweetData) {
-                        this.postLeagueTweet(leagueTweetData);
+                        // Schedule future tweets if RUN_ON_START is true
+                        if (ENV.RUN_ON_START) {
+                            this.scheduleLeagueTweet(league, leagueTweetData);
+                        }
+                        
+                        // Post immediately if POST_ON_START is true
+                        if (ENV.POST_ON_START) {
+                            logger.info(`Posting tweet for ${league} immediately`);
+                            this.postLeagueTweet(leagueTweetData);
+                        }
                     } else {
-                        logger.info(`[INFO] No tweet data to post for ${league}`);
+                        logger.info(`No tweet data found for ${league}`);
                     }
-                });
-            }
+                } else {
+                    // Don't log "No games found" - azuroProvider already logs this
+                    // Just log debug info for tracking which league was checked
+                    logger.info(`Checked ${league} league`);
+                }
+            });
+            
+            // Wait for all fetches to complete
+            Promise.all(fetchPromises).catch(err => {
+                logger.error('Error during startup fetches:', err);
+            });
         }
 
-        logger.info('[INFO] AzuroScheduler started successfully');
+        logger.info('AzuroScheduler started successfully');
     }
 
     /**
@@ -114,7 +97,7 @@ export class AzuroScheduler {
 
         const timeUntilNextFetch = targetTime.getTime() - now.getTime();
         
-        logger.info(`[INFO] Scheduling ${league} fetch at ${targetTime.toISOString()} (in ${Math.round(timeUntilNextFetch/1000/60)} minutes)`);
+        logger.info(`Scheduling ${league} fetch at ${targetTime.toISOString()} (in ${Math.round(timeUntilNextFetch/1000/60)} minutes)`);
 
         // Schedule the first fetch
         const timeout = setTimeout(() => {
@@ -133,97 +116,81 @@ export class AzuroScheduler {
      */
     async fetchAndScheduleLeague(league: string) {
         try {
-            logger.info(`[INFO] Fetching games for ${league}`);
+            logger.info(`Fetching games for ${league}`);
             
             const gamesData = await azuroProvider.getGames(leagues[league as keyof typeof leagues].leagueId);
 
             if (!gamesData || !gamesData.tweets || gamesData.tweets.length === 0) {
-                logger.info(`[INFO] No games found for ${league}`);
+                // Don't log "No games found" - azuroProvider already logs this
+                // Just log debug info for tracking which league was checked
+                logger.info(`Checked ${league} league`);
                 return;
             }
 
             // Match using leagueId
             const leagueTweetData = gamesData.tweets.find(t => t.leagueId === leagues[league as keyof typeof leagues].leagueId);
             if (!leagueTweetData) {
-                logger.info(`[INFO] No tweet data found for ${league}`);
+                logger.info(`No tweet data found for ${league}`);
                 return;
             }
-
-            const firstGame = leagueTweetData.games?.[0];
-            if (!firstGame) {
-                logger.info(`[INFO] No games found in tweet data for ${league}`);
-                return;
-            }
-
-            // Schedule post for 1 hour before the first game
-            const postTime = Number(firstGame.startsAt) * 1000 - (60 * 60 * 1000);
-            const timeUntilPost = postTime - Date.now();
             
-            if (timeUntilPost > 0) {
-                logger.info(`[INFO] Scheduling ${league} post for ${new Date(postTime).toISOString()}`, {
-                    firstGameTime: new Date(Number(firstGame.startsAt) * 1000).toISOString(),
-                    scheduledPostTime: new Date(postTime).toISOString(),
-                    timeUntilPost: `${Math.floor(timeUntilPost / 1000 / 60)} minutes`
-                });
-                
-                setTimeout(() => {
-                    this.postLeagueTweet(leagueTweetData);
-                }, timeUntilPost);
-            } else {
-                logger.info(`[WARN] Cannot schedule ${league} post - first game starts too soon`);
-            }
+            // Schedule the tweet using our helper method
+            this.scheduleLeagueTweet(league, leagueTweetData);
 
         } catch (error) {
-            logger.error(`[ERROR] Error fetching and scheduling ${league}:`, error);
+            logger.error(`Error fetching and scheduling ${league}:`, error);
         }
     }
 
     /**
      * Post a league tweet with its attachments
      */
-    async postLeagueTweet(tweetData: any) {
+    async postLeagueTweet(tweetData: TweetData) {
         try {
-            logger.info("[INFO] Attempting to post league tweet...");
+            logger.info("Attempting to post league tweet...");
 
             // Prepare media data if there are attachments
             let mediaData = null;
             if (tweetData.attachments && tweetData.attachments.length > 0) {
-                logger.info("[INFO] Processing image attachments for tweet");
+                logger.info("Processing image attachments for tweet");
                 mediaData = await prepareMediaData(tweetData.attachments);
-                logger.info("[INFO] Media data prepared successfully");
+                logger.info("Media data prepared successfully");
             }
 
+            // Format tweet text (handles game limiting for non-Blue accounts)
+            const tweetText = formatTweetText(tweetData);
+
             let tweetResult, firstTweetId;
-            if (SUPPORTS_NOTETWEET) {
-                logger.info("[INFO] SUPPORTS_NOTETWEET is true: Using NoteTweet.");
+            if (ENV.SUPPORTS_NOTETWEET) {
+                logger.info("SUPPORTS_NOTETWEET is true: Using NoteTweet.");
                 const noteTweetResult = await this.twitterClient.sendNoteTweet(
-                    tweetData.text,
+                    tweetText,
                     undefined,
                     mediaData ?? undefined
                 );
                 tweetResult = noteTweetResult.data.notetweet_create.tweet_results.result;
                 firstTweetId = tweetResult.rest_id;
-                logger.info("[INFO] NoteTweet successfully posted with ID:", firstTweetId);
+                logger.info("NoteTweet successfully posted with ID:", firstTweetId);
             } else {
-                logger.info("[INFO] SUPPORTS_NOTETWEET is false: Using standard Tweet.");
+                logger.info("SUPPORTS_NOTETWEET is false: Using standard Tweet.");
                 const tweetResponse = await this.twitterClient.sendTweet(
-                    tweetData.text,
+                    tweetText,
                     undefined,
                     mediaData ?? undefined
                 );
                 const tweetBody = await tweetResponse.json();
                 tweetResult = tweetBody.data.create_tweet.tweet_results.result;
                 firstTweetId = tweetResult.rest_id;
-                logger.info("[INFO] Tweet successfully posted with ID:", firstTweetId);
+                logger.info("Tweet successfully posted with ID:", firstTweetId);
             }
 
             // Wait a bit before posting the reply
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, TWITTER_CONFIG.THREAD_DELAY_MS));
 
-            // Second tweet with dynamic links specific to this league
-            const linkTweet = `Bet prematch: https://pinwin.xyz/?sport=${tweetData.sportSlug}&country=${tweetData.countrySlug}&league=${tweetData.leagueSlug}\nBet LIVE: https://pinwin.xyz/?sport=${tweetData.sportSlug}&live=true`;
+            // Generate betting links tweet
+            const linkTweet = generateLinkTweet(tweetData);
             
-            logger.info("[INFO] Posting reply tweet with betting links...");
+            logger.info("Posting reply tweet with betting links...");
             
             // Post reply using first tweet's ID
             const replyResult = await this.twitterClient.sendTweet(
@@ -234,15 +201,44 @@ export class AzuroScheduler {
             const replyBody = await replyResult.json();
             
             if (replyBody?.data?.create_tweet?.tweet_results?.result) {
-                logger.info("[INFO] Thread complete for league", {
+                logger.info("Thread complete for league", {
                     mainTweetId: firstTweetId,
                     replyTweetId: replyBody.data.create_tweet.tweet_results.result.rest_id
                 });
             } else {
-                logger.error("[ERROR] Failed to post reply tweet:", replyBody);
+                logger.error("Failed to post reply tweet:", replyBody);
             }
         } catch (error) {
-            logger.error("[ERROR] Error posting league tweet:", error);
+            logger.error("Error posting league tweet:", error);
+        }
+    }
+
+    /**
+     * Schedule a tweet for a league based on its first game
+     */
+    private scheduleLeagueTweet(league: string, tweetData: TweetData) {
+        const firstGame = tweetData.games?.[0];
+        if (!firstGame) {
+            logger.info(`No games found in tweet data for ${league}`);
+            return;
+        }
+
+        // Schedule post for 1 hour before the first game
+        const postTime = Number(firstGame.startsAt) * 1000 - (60 * 60 * 1000);
+        const timeUntilPost = postTime - Date.now();
+        
+        if (timeUntilPost > 0) {
+            logger.info(`Scheduling ${league} post for ${new Date(postTime).toISOString()}`, {
+                firstGameTime: new Date(Number(firstGame.startsAt) * 1000).toISOString(),
+                scheduledPostTime: new Date(postTime).toISOString(),
+                timeUntilPost: `${Math.floor(timeUntilPost / 1000 / 60)} minutes`
+            });
+            
+            setTimeout(() => {
+                this.postLeagueTweet(tweetData);
+            }, timeUntilPost);
+        } else {
+            logger.warn(`Cannot schedule ${league} post - first game starts too soon`);
         }
     }
 
@@ -255,6 +251,6 @@ export class AzuroScheduler {
             clearTimeout(timeout);
         }
         this.leagueSchedules.clear();
-        logger.info("[INFO] AzuroScheduler stopped");
+        logger.info('AzuroScheduler stopped');
     }
 }
